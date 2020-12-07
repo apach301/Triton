@@ -73,7 +73,7 @@ void check(void)
   int* utab4 = (int*)((char*)_utab4 + 1);
 
   init(tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8);
-
+/*
   // Check concat symbolic expression
   asm("mov sil, 0x99");
   asm("cmp rsi, 0xffffffffffffff99");
@@ -4407,7 +4407,7 @@ void check(void)
   asm("popcnt edx, eax");
   asm("mov eax, 123456");
   asm("popcnt edx, eax");
-
+*/
   asm("mov ax, -1");
   asm("popcnt dx, ax");
   asm("mov ax, 0");
@@ -4418,6 +4418,25 @@ void check(void)
   asm("popcnt dx, ax");
   asm("mov ax, 12345");
   asm("popcnt dx, ax");
+
+  // pcmpistri
+  asm("vmovdqa xmm1, xmmword ptr [%0]" :: "r"(tab1));
+  asm("vmovdqa xmm1, xmmword ptr [%0]" :: "r"(tab1));
+  asm("pcmpistri xmm1, xmm2, 0");
+  asm("pcmpistri xmm1, xmm2, 1");
+  asm("pcmpistri xmm1, xmm2, 3");
+
+  asm("pcmpistri xmm1, xmm2, 64");
+  asm("pcmpistri xmm1, xmm2, 65");
+  asm("pcmpistri xmm1, xmm2, 81");
+
+  asm("pcmpistri xmm1, xmm2, 82");
+  asm("pcmpistri xmm1, xmm2, 83");
+
+  asm("pcmpistri xmm1, xmm2, 32");
+  asm("pcmpistri xmm1, xmm2, 48");
+
+
 
 }
 

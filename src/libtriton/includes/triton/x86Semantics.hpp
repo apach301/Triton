@@ -943,6 +943,13 @@ namespace triton {
           //! The PCMPGTW semantics.
           void pcmpgtw_s(triton::arch::Instruction& inst);
 
+          //! The PCMPISTRI semantics.
+          void pcmpistri_s(triton::arch::Instruction& inst);
+          triton::ast::SharedAbstractNode bit_position(uint32 pos, triton::ast::SharedAbstractNode node, uint32 bv_size, bool lsb);
+          //triton::ast::SharedAbstractNode fun_lsb(uint32 bit_num, triton::ast::SharedAbstractNode node, uint32 size);
+          //triton::ast::SharedAbstractNode fun_msb(uint32 bit_num, triton::ast::SharedAbstractNode node, uint32 size);
+          //triton::ast::SharedAbstractNode fun(uint32 pos1, uint32 pos2, triton::ast::SharedAbstractNode node, bool mode);
+
           //! The PEXTRB semantics.
           void pextrb_s(triton::arch::Instruction& inst);
 

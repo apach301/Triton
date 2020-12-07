@@ -198,6 +198,7 @@ PCMPEQW                      | mmx/sse2   | Compare Packed Data for Equal (words
 PCMPGTB                      | mmx/sse2   | Compare Packed Data for Greater Than (bytes)
 PCMPGTD                      | mmx/sse2   | Compare Packed Data for Greater Than (dwords)
 PCMPGTW                      | mmx/sse2   | Compare Packed Data for Greater Than (words)
+PCMPISTRI                    | sse4.2     | Packed Compare Implicit Length Strings, Return Index
 PEXTRB                       | sse4.1     | Extract Byte
 PEXTRD                       | sse4.1     | Extract Dword
 PEXTRQ                       | sse4.1     | Extract Qword
@@ -601,6 +602,7 @@ namespace triton {
           case ID_INS_PCMPGTB:        this->pcmpgtb_s(inst);      break;
           case ID_INS_PCMPGTD:        this->pcmpgtd_s(inst);      break;
           case ID_INS_PCMPGTW:        this->pcmpgtw_s(inst);      break;
+          case ID_INS_PCMPISTRI:      this->pcmpistri_s(inst);    break;
           case ID_INS_PEXTRB:         this->pextrb_s(inst);       break;
           case ID_INS_PEXTRD:         this->pextrd_s(inst);       break;
           case ID_INS_PEXTRQ:         this->pextrq_s(inst);       break;
@@ -8880,6 +8882,319 @@ namespace triton {
 
         /* Update the symbolic control flow */
         this->controlFlow_s(inst);
+      }
+
+
+      void x86Semantics::pcmpistri_s(triton::arch::Instruction& inst) {
+
+        /*
+         * Create formula to check whether element from one string is equal to one of the valid
+         * elements from another string:
+         * (a[i] == b[0] or ... or a[i] == b[len])
+         */
+        auto equal_any = [this](triton::ast::SharedAbstractNode elem, triton::ast::SharedAbstractNode op, uint32 len_op1, uint32 sz) {
+            std::list<triton::ast::SharedAbstractNode> lst;
+            for (uint32 i = 0; i < len_op1; ++i) {
+              lst.push_front(this->astCtxt->equal(
+                               this->astCtxt->extract(sz * i + sz - 1, sz * i, op),
+                               elem));
+            }
+            return lst.size() == 1 ? lst.front() : this->astCtxt->lor(lst);
+        };
+
+        /*
+         * Create formula to check whether element from one string is in one of the ranges
+         * specified by another string:
+         * (a[i] >= b[0] and a[i] <= b[1]) or (a[i] >= b[2] and a[i] <= b[3]) or ...
+         */
+        auto ranges = [this](triton::ast::SharedAbstractNode elem, triton::ast::SharedAbstractNode op, uint32 len_op1, bool sign, uint32 sz) {
+            std::list<triton::ast::SharedAbstractNode> lst;
+            for (uint32 i = 0; i < len_op1 / 2; ++i) {
+              auto min = this->astCtxt->extract(sz * 2 * i + sz - 1, sz * 2 * i, op);
+              auto max = this->astCtxt->extract(sz * 2 * i + 2 * sz - 1, sz * 2 * i + sz, op);
+              lst.push_front(this->astCtxt->land(
+                               sign ? this->astCtxt->bvsgt(elem, min) : this->astCtxt->bvugt(elem, min),
+                               sign ? this->astCtxt->bvslt(elem, max) : this->astCtxt->bvult(elem, max))
+                            );
+            }
+            return lst.size() == 1 ? lst.front() : this->astCtxt->lor(lst);
+        };
+
+        /*
+         * Create formula to compare two strings.
+         * (a[0] == b[0] and a[1] == b[1] and ... and a[i] == b[i])
+         */
+        auto compare_strings = [this](triton::ast::SharedAbstractNode elem1, triton::ast::SharedAbstractNode elem2, uint32 len, uint32 sz) {
+          std::list<triton::ast::SharedAbstractNode> lst;
+          for (uint32 i = 0; i < len; ++i) {
+            lst.push_front(this->astCtxt->equal(
+                             this->astCtxt->extract(sz * i + sz - 1, sz * i, elem1),
+                             this->astCtxt->extract(sz * i + sz - 1, sz * i, elem2))
+                          );
+          }
+          return lst.size() == 1 ? lst.front() : this->astCtxt->land(lst);
+        };
+
+        std::cout << "============================INSTR============================" << std::endl;
+        std::cout << inst << std::endl;
+
+        auto& src1 = inst.operands[0];
+        auto& src2 = inst.operands[1];
+        auto& ctrl = inst.operands[2];
+        auto  ecx  = triton::arch::OperandWrapper(this->architecture->getParentRegister(ID_REG_X86_ECX));
+        auto  cf   = triton::arch::OperandWrapper(this->architecture->getRegister(ID_REG_X86_CF));
+        auto  zf   = triton::arch::OperandWrapper(this->architecture->getRegister(ID_REG_X86_ZF));
+        auto  sf   = triton::arch::OperandWrapper(this->architecture->getRegister(ID_REG_X86_SF));
+        auto  of   = triton::arch::OperandWrapper(this->architecture->getRegister(ID_REG_X86_OF));
+
+        auto op1 = this->symbolicEngine->getOperandAst(inst, src1);
+        auto op2 = this->symbolicEngine->getOperandAst(inst, src2);
+
+        std::cout << "op1 = " << op1 << ", eval = " << op1->evaluate() << std::endl;
+        std::cout << "op2 = " << op2 << ", eval = " << op2->evaluate() << std::endl;
+        std::cout << "ctrl: " << this->symbolicEngine->getOperandAst(inst, ctrl) <<
+          ", value = " << std::hex << ctrl.getImmediate().getValue() << std::dec << std::endl;
+
+        auto value = ctrl.getImmediate().getValue();
+        uint32 num = value & 0x1 ? 8 : 16;
+        auto sz = num == 16 ? triton::bitsize::byte : triton::bitsize::word;
+        bool sign = (value & 0x2) >> 1;
+
+        std::cout << num << " num, " << (sign ? "signed" : "unsigned") << std::endl;
+
+        std::cout << "granularity  = " << (value & 0x1) << std::endl;
+        std::cout << "sign         = " << ((value & 0x2) >> 1) << std::endl;
+        std::cout << "mode         = " << ((value & 0xc) >> 2) << std::endl;
+        std::cout << "polarity     = " << ((value & 0x30) >> 4) << std::endl;
+        std::cout << "return value = " << ((value & 0x40) >> 6) << std::endl;
+
+        // Get concrete length of two strings.
+        size_t len_op1 = 0;
+        for (; len_op1 < num; ++len_op1) {
+            auto value = this->astCtxt->extract(sz * len_op1 + sz - 1, sz * len_op1, op1)->evaluate();
+            if (value == 0) {
+                break;
+            }
+        }
+        std::cout << "len_op1 = " << len_op1 << std::endl;
+
+        size_t len_op2 = 0;
+        for (; len_op2 < num; ++len_op2) {
+            auto value = this->astCtxt->extract(sz * len_op2 + sz - 1, sz * len_op2, op2)->evaluate();
+            if (value == 0) {
+                break;
+            }
+        }
+        std::cout << "len_op2 = " << len_op2 << std::endl;
+
+        std::list<triton::ast::SharedAbstractNode> lst;
+        switch ((value & 0xc) >> 2) {
+          /*
+           * Mode 0x00: Equal Any.
+           * Test if any of the specified characters are in the input string.
+           */
+          case 0b00: {
+            for (uint32 i = 0; i < num; ++i) {
+              if (i > len_op2) {
+                lst.push_front(this->astCtxt->bvfalse());
+                continue;
+              }
+              lst.push_front(this->astCtxt->ite(
+                               equal_any(this->astCtxt->extract(sz * i + sz - 1, sz * i, op2), op1, len_op1, sz),
+                               this->astCtxt->bvtrue(),
+                               this->astCtxt->bvfalse())
+                            );
+            }
+            break;
+          }
+
+          /*
+           * Mode 0x01: Ranges.
+           * Test if any characters within the specified ranges are in the input string.
+           */
+          case 0b01: {
+            std::list<triton::ast::SharedAbstractNode> lst;
+            for (uint32 i = 0; i < num; ++i) {
+              if (i > len_op2) {
+                lst.push_back(this->astCtxt->bvfalse());
+              }
+              lst.push_front(this->astCtxt->ite(
+                               ranges(this->astCtxt->extract(sz * i + sz - 1, sz * i, op2), op1, len_op1, sign, sz),
+                               this->astCtxt->bvtrue(),
+                               this->astCtxt->bvfalse())
+                            );
+            }
+            break;
+          }
+
+          /*
+           * Mode 0x10: Equal Each.
+           * Test if the input strings are equal.
+           */
+          case 0b10: {
+            for (uint32 i = 0; i < len_op2; ++i) {
+              if (i < len_op1) {
+                lst.push_front(this->astCtxt->ite(
+                                 this->astCtxt->equal(
+                                   this->astCtxt->extract(sz * i + sz - 1, sz * i, op1),
+                                   this->astCtxt->extract(sz * i + sz - 1, sz * i, op2)),
+                                 this->astCtxt->bvtrue(),
+                                 this->astCtxt->bvfalse())
+                              );
+                continue;
+              }
+              lst.push_front(this->astCtxt->bvfalse());
+            }
+            for (uint32 i = len_op2; i < num; ++i) {
+              if (i < len_op1) {
+                lst.push_front(this->astCtxt->bvfalse());
+                continue;
+              }
+              lst.push_front(this->astCtxt->bvtrue());
+            }
+            break;
+          }
+
+          /*
+           * Mode 0x11: Equal Ordered.
+           *  	Test if the needle string is in the haystack string.
+           */
+          case 0b11: {
+            for (uint32 i = 0; i < num; ++i) {
+              auto low = i;
+              uint32 high = i + len_op1;
+              high = std::min(high, num);
+              auto elem2 = this->astCtxt->extract(high * sz, low * sz, op2);
+              bool invalid = high > len_op2;
+              size_t cur_len = high - low + 1;
+              auto elem1 = this->astCtxt->extract(std::min(len_op1, cur_len) * sz, 0, op1);
+              if (invalid) {
+                lst.push_front(this->astCtxt->bvfalse());
+                continue;
+              }
+              lst.push_front(this->astCtxt->ite(
+                               compare_strings(elem1, elem2, cur_len, sz),
+                               this->astCtxt->bvtrue(),
+                               this->astCtxt->bvfalse())
+                            );
+            }
+            break;
+          }
+        }
+
+        std::cout << "process polarity" << std::endl;
+
+        auto intRes1 = this->astCtxt->concat(lst);
+        triton::ast::SharedAbstractNode intRes2;
+        switch ((value & 0x30) >> 4) {
+          case 0b00:
+          case 0b10:
+            intRes2 = intRes1;
+            break;
+          case 0b01:
+            intRes2 = this->astCtxt->bvnot(intRes1);
+            break;
+          case 0b11: {
+            //intRes2 = this->astCtxt->concat(
+            //            this->astCtxt->extract(num * sz - 1, len_op2 * sz, intRes1),
+            //            this->astCtxt->bvnot(
+            //              this->astCtxt->extract(len_op2 * sz - 1, 0, intRes1))
+            //          );
+            intRes2 = intRes1;
+          }
+        }
+
+        std::cout << "process return value" << std::endl;
+
+        auto ref = this->astCtxt->reference(this->symbolicEngine->createSymbolicVolatileExpression(inst, intRes2));
+        triton::ast::SharedAbstractNode bit_pos;
+        if ((value & 0x40) >> 6) {
+          // Find position of the most significant set bit.
+          bit_pos = bit_position(num - 1, ref, num, false);
+        }
+        else {
+          // Find position of the least significant set bit.
+          bit_pos = bit_position(0, ref, num, true);
+        }
+
+        std::cout << "bit position counted: " << bit_pos->evaluate() << std::endl;
+        std::cout << "construct result: ref = " << ref << std::endl;
+
+        auto result = this->astCtxt->ite(
+                        this->astCtxt->equal(ref, this->astCtxt->bv(0, num)),
+                        this->astCtxt->bv(num, 32),
+                        bit_pos);
+
+        std::cout << "intRes1 evaluate = " << std::hex << intRes1->evaluate() << std::dec << std::endl;
+        std::cout << "intRes2 evaluate = " << std::hex << intRes2->evaluate() << std::dec << std::endl;
+        std::cout << "result node is " << result << std::endl;
+        std::cout << "result evaluate = " << result->evaluate() << std::endl;
+
+        /* Create symbolic expression */
+        auto expr = this->symbolicEngine->createSymbolicExpression(inst, result, ecx, "PCMPISTRI operation");
+
+        /* Update symbolic flags */
+        auto cf_node = this->astCtxt->ite(
+                         this->astCtxt->equal(
+                           intRes2,
+                           this->astCtxt->bv(0, num)),
+                         this->astCtxt->bvfalse(),
+                         this->astCtxt->bvtrue());
+        auto expr_cf = this->symbolicEngine->createSymbolicExpression(inst, cf_node, cf.getRegister(), "PCMPISTRI CF operation");
+
+        auto zf_node = len_op2 < num ? this->astCtxt->bvtrue() : this->astCtxt->bvfalse();
+        //auto expr_zf = this->symbolicEngine->createSymbolicExpression(inst, zf_node, zf.getRegister(), "PCMPISTRI ZF operation");
+
+        auto sf_node = len_op1 < num ? this->astCtxt->bvtrue() : this->astCtxt->bvfalse();
+        //auto expr_sf = this->symbolicEngine->createSymbolicExpression(inst, sf_node, sf.getRegister(), "PCMPISTRI SF operation");
+
+        auto of_node = this->astCtxt->extract(0, 0, intRes2);
+        auto expr_of = this->symbolicEngine->createSymbolicExpression(inst, of_node, of.getRegister(), "PCMPISTRI OF operation");
+
+        this->clearFlag_s(inst, this->architecture->getRegister(ID_REG_X86_AF), "Clears adjust flag");
+        this->clearFlag_s(inst, this->architecture->getRegister(ID_REG_X86_PF), "Clears parity flag");
+
+        std::cout << "CF=" << cf_node->evaluate() << ", ZF=" << zf_node->evaluate() << ", SF=" << sf_node->evaluate() << ", OF=" <<
+          of_node->evaluate() << std::endl;
+
+        /* Apply the taint */
+        expr->isTainted = this->taintEngine->taintAssignment(ecx, src1) | this->taintEngine->taintUnion(ecx, src2);
+        expr_cf->isTainted = this->taintEngine->taintAssignment(cf, src1) | this->taintEngine->taintUnion(cf, src2);
+        //expr_zf->isTainted = this->taintEngine->taintAssignment(zf, src1) | this->taintEngine->taintUnion(zf, src2);
+        //expr_sf->isTainted = this->taintEngine->taintAssignment(sf, src1) | this->taintEngine->taintUnion(sf, src2);
+        expr_of->isTainted = this->taintEngine->taintAssignment(of, src1) | this->taintEngine->taintUnion(of, src2);
+
+        /* Update the symbolic control flow */
+        this->controlFlow_s(inst);
+      }
+
+      triton::ast::SharedAbstractNode x86Semantics::bit_position(uint32 pos, triton::ast::SharedAbstractNode node, uint32 bv_size, bool lsb) {
+        if (pos == (lsb ? bv_size : 0)) {
+          return this->astCtxt->bv(0, 32);
+        }
+
+        triton::ast::SharedAbstractNode cond;
+        if (pos == (lsb ? 0 : bv_size - 1)) {
+          cond = this->astCtxt->equal(
+                   this->astCtxt->extract(pos, pos, node),
+                   this->astCtxt->bvtrue());
+        }
+        else {
+          auto high = lsb ? pos - 1 : bv_size - 1;
+          auto low = lsb ? 0 : pos + 1;
+          cond = this->astCtxt->land(
+                   this->astCtxt->equal(
+                     this->astCtxt->extract(pos, pos, node),
+                     this->astCtxt->bvtrue()),
+                   this->astCtxt->equal(
+                     this->astCtxt->extract(high, low, node),
+                     this->astCtxt->bv(0, lsb ? pos : bv_size - 1 - pos)));
+        }
+
+        return node = this->astCtxt->ite(
+                      cond,
+                      this->astCtxt->bv(pos, 32),
+                      bit_position(lsb ? pos + 1 : pos - 1, node, bv_size, lsb));
       }
 
 
